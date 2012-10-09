@@ -3,6 +3,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef struct {
+    unsigned long offset;
+    unsigned long size;
+    unsigned short *data;
+} memory_region_t;
+
+int n_memory_regions;
+memory_region_t *memory_regions;
+
 unsigned int read32 ( unsigned int );
 
 unsigned int read_register ( unsigned int );
@@ -10,7 +19,7 @@ unsigned int read_register ( unsigned int );
 #define DBUGFETCH   0
 #define DBUGRAM     0
 #define DBUGRAMW    0
-#define DBUGREG     1
+#define DBUGREG     0
 #define DBUG        0
 #define DISS        1
 
@@ -20,8 +29,8 @@ unsigned int read_register ( unsigned int );
 #define ROMSIZE (ROMADDMASK+1)
 #define RAMSIZE (RAMADDMASK+1)
 
-unsigned short rom[ROMSIZE>>1];
-unsigned short ram[RAMSIZE>>1];
+// unsigned short rom[ROMSIZE>>1];
+// unsigned short ram[RAMSIZE>>1];
 
 #define CPSR_N (1<<31)
 #define CPSR_Z (1<<30)
@@ -49,6 +58,54 @@ unsigned long reads;
 unsigned long writes;
 unsigned long systick_ints;
 
+void alloc_memory_regions(int n)
+{
+    n_memory_regions = n;
+
+    memory_regions = malloc(sizeof(memory_region_t)*n);
+}
+
+void set_memory_region(int i, unsigned long offset, unsigned long size)
+{
+    memory_regions[i].offset = offset;
+    memory_regions[i].size = size;
+    memory_regions[i].data = malloc(sizeof(short)*(size>>1));
+}
+
+unsigned read_from_memory16(unsigned int addr)
+{
+    for(int i = 0; i < n_memory_regions; ++i)
+    {
+        if(addr >= memory_regions[i].offset && addr < memory_regions[i].offset + memory_regions[i].size)
+        {
+            return memory_regions[i].data[(addr-memory_regions[i].offset) >> 1];
+        }
+    }
+    fprintf(stderr, "Memory region not mapped (%08X). ABORT\n", addr);
+    exit(1);
+}
+
+void write_to_memory16(unsigned int addr, unsigned short data)
+{
+    for(int i = 0; i < n_memory_regions; ++i)
+    {
+        if(addr >= memory_regions[i].offset && addr < memory_regions[i].offset + memory_regions[i].size)
+        {
+            memory_regions[i].data[(addr-memory_regions[i].offset)>>1] = data;
+            return;
+        }
+    }
+    fprintf(stderr, "Memory region not mapped (%08X). ABORT\n", addr);
+    exit(1);
+}
+
+void reset_memory()
+{
+    for(int i = 0; i < n_memory_regions; ++i)
+    {
+        memset(memory_regions[i].data, 0, memory_regions[i].size);
+    }
+}
 
 
 //-------------------------------------------------------------------
@@ -71,32 +128,13 @@ unsigned int fetch16 ( unsigned int addr )
 
 if(DBUGFETCH) fprintf(stderr,"fetch16(0x%08X)=",addr);
 if(DBUG) fprintf(stderr,"fetch16(0x%08X)=",addr);
-    switch(addr&0xF0000000)
-    {
-        case 0x00000000: //ROM
-            addr&=ROMADDMASK;
 
-//if(addr<0x50)
-//{
-//    fprintf(stderr,"fetch16(0x%08X), abort\n",addr);
-//    exit(1);
-//}
+    data = read_from_memory16(addr);
 
-            addr>>=1;
-            data=rom[addr];
 if(DBUGFETCH) fprintf(stderr,"0x%04X\n",data);
 if(DBUG) fprintf(stderr,"0x%04X\n",data);
-            return(data);
-        case 0x40000000: //RAM
-            addr&=RAMADDMASK;
-            addr>>=1;
-            data=ram[addr];
-if(DBUGFETCH) fprintf(stderr,"0x%04X\n",data);
-if(DBUG) fprintf(stderr,"0x%04X\n",data);
-            return(data);
-    }
-    fprintf(stderr,"fetch16(0x%08X), abort pc = 0x%04X\n",addr,read_register(15));
-    exit(1);
+
+    return(data);
 }
 //-------------------------------------------------------------------
 unsigned int fetch32 ( unsigned int addr )
@@ -105,50 +143,19 @@ unsigned int fetch32 ( unsigned int addr )
 
 if(DBUGFETCH) fprintf(stderr,"fetch32(0x%08X)=",addr);
 if(DBUG) fprintf(stderr,"fetch32(0x%08X)=",addr);
-    switch(addr&0xF0000000)
-    {
-        case 0x00000000: //ROM
-            if(addr<0x50)
-            {
-                data=read32(addr);
-if(DBUGFETCH) fprintf(stderr,"0x%08X\n",data);
-if(DBUG) fprintf(stderr,"0x%08X\n",data);
-                if(addr==0x00000000) return(data);
-                if(addr==0x00000004) return(data);
-                if(addr==0x0000003C) return(data);
-                fprintf(stderr,"fetch32(0x%08X), abort pc = 0x%04X\n",addr,read_register(15));
-                exit(1);
-            }
-        case 0x40000000: //RAM
-            //data=fetch16(addr+0);
-            //data|=((unsigned int)fetch16(addr+2))<<16;
+
             data=read32(addr);
 if(DBUGFETCH) fprintf(stderr,"0x%08X\n",data);
 if(DBUG) fprintf(stderr,"0x%08X\n",data);
             return(data);
-    }
-    fprintf(stderr,"fetch32(0x%08X), abort pc 0x%04X\n",addr,read_register(15));
-    exit(1);
 }
 //-------------------------------------------------------------------
 void write16 ( unsigned int addr, unsigned int data )
 {
-
     writes++;
 
-
-if(DBUG) fprintf(stderr,"write16(0x%08X,0x%04X)\n",addr,data);
-    switch(addr&0xF0000000)
-    {
-        case 0x40000000: //RAM
-if(DBUGRAM) fprintf(stderr,"write16(0x%08X,0x%04X)\n",addr,data);
-            addr&=RAMADDMASK;
-            addr>>=1;
-            ram[addr]=data&0xFFFF;
-            return;
-    }
-    fprintf(stderr,"write16(0x%08X,0x%04X), abort pc 0x%04X\n",addr,data,read_register(15));
-    exit(1);
+    if(DBUG) fprintf(stderr,"write16(0x%08X,0x%04X)\n",addr,data);
+    write_to_memory16(addr, data);
 }
 //-------------------------------------------------------------------
 void write32 ( unsigned int addr, unsigned int data )
@@ -218,14 +225,10 @@ fflush(stdout);
                     return;
                 }
             }
-        case 0x40000000: //RAM
-if(DBUGRAMW) fprintf(stderr,"write32(0x%08X,0x%08X)\n",addr,data);
-            write16(addr+0,(data>> 0)&0xFFFF);
-            write16(addr+2,(data>>16)&0xFFFF);
-            return;
     }
-    fprintf(stderr,"write32(0x%08X,0x%08X), abort pc 0x%04X\n",addr,data,read_register(15));
-    exit(1);
+    if(DBUGRAMW) fprintf(stderr,"write32(0x%08X,0x%08X)\n",addr,data);
+    write16(addr+0,(data>> 0)&0xFFFF);
+    write16(addr+2,(data>>16)&0xFFFF);
 }
 //-----------------------------------------------------------------
 unsigned int read16 ( unsigned int addr )
@@ -235,26 +238,10 @@ unsigned int read16 ( unsigned int addr )
     reads++;
 
 if(DBUG) fprintf(stderr,"read16(0x%08X)=",addr);
-    switch(addr&0xF0000000)
-    {
-        case 0x00000000: //ROM
-            addr&=ROMADDMASK;
-            addr>>=1;
-            data=rom[addr];
-if(DBUG) fprintf(stderr,"0x%04X\n",data);
-            return(data);
-        case 0x40000000: //RAM
-if(DBUGRAM) fprintf(stderr,"read16(0x%08X)=",addr);
-            addr&=RAMADDMASK;
-            addr>>=1;
-            data=ram[addr];
-if(DBUG) fprintf(stderr,"0x%04X\n",data);
-if(DBUGRAM) fprintf(stderr,"0x%04X\n",data);
-            return(data);
-    }
-    fprintf(stderr,"read16(0x%08X), abort pc 0x%04X\n",addr,read_register(15));
-    exit(1);
+
+    return read_from_memory16(addr);
 }
+
 //-------------------------------------------------------------------
 unsigned int read32 ( unsigned int addr )
 {
@@ -263,14 +250,6 @@ unsigned int read32 ( unsigned int addr )
 if(DBUG) fprintf(stderr,"read32(0x%08X)=",addr);
     switch(addr&0xF0000000)
     {
-        case 0x00000000: //ROM
-        case 0x40000000: //RAM
-if(DBUGRAMW) fprintf(stderr,"read32(0x%08X)=",addr);
-            data =read16(addr+0);
-            data|=((unsigned int)read16(addr+2))<<16;
-if(DBUG) fprintf(stderr,"0x%08X\n",data);
-if(DBUGRAMW) fprintf(stderr,"0x%08X\n",data);
-            return(data);
         case 0xE0000000:
         {
             switch(addr)
@@ -299,8 +278,9 @@ if(DBUGRAMW) fprintf(stderr,"0x%08X\n",data);
             }
         }
     }
-    fprintf(stderr,"read32(0x%08X), abort pc 0x%04X\n",addr,read_register(15));
-    exit(1);
+    data = read16(addr+0);
+    data|=((unsigned int)read16(addr+2))<<16;
+    return data;
 }
 //-------------------------------------------------------------------
 unsigned int read_register ( unsigned int reg )
@@ -2035,7 +2015,7 @@ if(DISS) fprintf(stderr,"uxth r%u,r%u\n",rd,rm);
 //-------------------------------------------------------------------
 int reset ( void )
 {
-    memset(ram,0xFF,sizeof(ram));
+    // memset(ram,0xFF,sizeof(ram));
 
     systick_ctrl=0x00000004;
     systick_reload=0x00000000;
@@ -2075,8 +2055,12 @@ int run ( void )
 int main ( int argc, char *argv[] )
 {
     FILE *fp;
+    unsigned int ra, i;
 
-    unsigned int ra;
+    alloc_memory_regions(2);
+    set_memory_region(0, 0x00000000, 0x10000);
+    set_memory_region(1, 0x20000000, 0x10000);
+    reset_memory();
 
     if(argc<2)
     {
@@ -2095,8 +2079,18 @@ int main ( int argc, char *argv[] )
         fprintf(stderr,"Error opening file [%s]\n",argv[1]);
         return(1);
     }
-    memset(rom,0xFF,sizeof(rom));
-    ra=fread(rom,1,sizeof(rom),fp);
+    // memset(rom,0xFF,sizeof(rom));
+    i = 0;
+    while(!feof(fp))
+    {
+        unsigned short s;
+
+        fread(&s, 1, 2, fp);
+        write_to_memory16(i, s);
+        i += 2;
+    }
+
+    // ra=fread(rom,1,sizeof(rom),fp);
     fclose(fp);
 
     if(output_vcd)
@@ -2128,7 +2122,7 @@ int main ( int argc, char *argv[] )
         fprintf(fpvcd,"b0 inst\n");
     }
 
-    memset(ram,0x00,sizeof(ram));
+    // memset(ram,0x00,sizeof(ram));
     run();
     if(output_vcd)
     {
