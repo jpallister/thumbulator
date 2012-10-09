@@ -1,7 +1,10 @@
 
 #include <stdio.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <libelf.h>
+#include <gelf.h>
 
 typedef struct {
     unsigned long offset;
@@ -42,6 +45,9 @@ unsigned int vcdcount;
 unsigned int output_vcd;
 FILE *fpvcd;
 
+int input_elf = 0;
+unsigned long elf_start_address = 0;
+
 unsigned int systick_ctrl;
 unsigned int systick_reload;
 unsigned int systick_count;
@@ -81,7 +87,7 @@ unsigned read_from_memory16(unsigned int addr)
             return memory_regions[i].data[(addr-memory_regions[i].offset) >> 1];
         }
     }
-    fprintf(stderr, "Memory region not mapped (%08X). ABORT\n", addr);
+    fprintf(stderr, "Memory region not mapped (0x%08X). ABORT\n", addr);
     exit(1);
 }
 
@@ -95,7 +101,7 @@ void write_to_memory16(unsigned int addr, unsigned short data)
             return;
         }
     }
-    fprintf(stderr, "Memory region not mapped (%08X). ABORT\n", addr);
+    fprintf(stderr, "Memory region not mapped (0x%08X). ABORT\n", addr);
     exit(1);
 }
 
@@ -555,11 +561,11 @@ if(DISS) fprintf(stderr,"add r%u,r%u\n",rd,rm);
         rc=ra+rb;
         if(rd==15)
         {
-            if((rc&1)==0)
-            {
-                fprintf(stderr,"add pc,... produced an arm address 0x%08X 0x%08X\n",pc,rc);
-                exit(1);
-            }
+            // if((rc&1)==0)
+            // {
+            //     fprintf(stderr,"add pc,... produced an arm address 0x%08X 0x%08X\n",pc,rc);
+            //     exit(1);
+            // }
             rc&=~1; //write_register may do this as well
             rc+=2; //The program counter is special
         }
@@ -1431,11 +1437,11 @@ if(DISS) fprintf(stderr,"mov r%u,r%u\n",rd,rm);
         rc=read_register(rm);
         if(rd==15)
         {
-            if((rc&1)==0)
-            {
-                fprintf(stderr,"cpy or mov pc,... produced an ARM address 0x%08X 0x%08X\n",pc,rc);
-                exit(1);
-            }
+            // if((rc&1)==0)
+            // {
+            //     fprintf(stderr,"cpy or mov pc,... produced an ARM address 0x%08X 0x%08X\n",pc,rc);
+            //     exit(1);
+            // }
             rc&=~1; //write_register may do this as well
             rc+=2; //The program counter is special
         }
@@ -2024,10 +2030,14 @@ int reset ( void )
     handler_mode=0;
     cpsr=0;
 
-    reg_norm[13]=fetch32(0x00000000); //cortex-m3
-    reg_norm[14]=0xFFFFFFFF;
-    reg_norm[15]=fetch32(0x00000004); //cortex-m3
-    reg_norm[15]+=2;
+    if(input_elf == 1)
+        reg_norm[15]=elf_start_address+3;
+    else
+    {
+        reg_norm[13]=fetch32(0x00000000); //cortex-m3
+        reg_norm[14]=0xFFFFFFFF;
+        reg_norm[15]=fetch32(0x00000004)+2; //cortex-m3
+    }
 
     instructions=0;
     fetches=0;
@@ -2052,15 +2062,119 @@ int run ( void )
     return(0);
 }
 //-------------------------------------------------------------------
+void load_elf_section(Elf *e, Elf_Scn *scn)
+{
+    Elf_Data *data;
+    GElf_Shdr shdr;
+    char *name;
+    int n;
+
+    if(gelf_getshdr(scn, &shdr) != &shdr)
+    {
+        fprintf(stderr,"Error: gelf_getshdr: %s\n",elf_errmsg(-1));
+        exit(1);
+    }
+
+    if(elf_getshdrstrndx(e, &n) != 0)
+    {
+        fprintf(stderr,"Error: elf_getshdrstrndx: %s\n",elf_errmsg(-1));
+        exit(1);
+    }
+
+    if((name=elf_strptr(e, n, shdr.sh_name))== NULL)
+    {
+        fprintf(stderr,"Error: elf_strptr: %s\n",elf_errmsg(-1));
+        exit(1);
+    }
+
+    if((shdr.sh_flags&SHF_ALLOC) > 0)
+    {
+        printf("Loading section @ 0x%08X\n", shdr.sh_addr);
+        n = 0;
+        data = NULL;
+        while(n*2 < shdr.sh_size && (data = elf_getdata(scn, data)) != NULL)
+        {
+            short *p = (short *)data->d_buf;
+
+            if(p == NULL)
+            {
+                printf("Unexpected nullness\n");
+                break;
+            }
+
+
+            for(int i = 0; i < data->d_size; i += 2)
+            {
+                write_to_memory16(shdr.sh_addr+n*2, *p);
+                n++; p++;
+            }
+        }
+    }
+}
+//-------------------------------------------------------------------
+void load_elf(char *fname)
+{
+    Elf *e;
+    int fd, n;
+    Elf_Kind ek;
+    GElf_Ehdr ehdr;
+    Elf_Scn *scn;
+
+    if (elf_version(EV_CURRENT) == EV_NONE)
+    {
+        fprintf(stderr, "Error with elf library\n");
+        exit(1);
+    }
+
+    fd = open(fname, O_RDONLY, 0);
+    if(fd < 0)
+    {
+        fprintf(stderr,"Error opening file [%s]\n",fname);
+        exit(1);
+    }
+
+    if((e = elf_begin(fd, ELF_C_READ, NULL)) == NULL)
+    {
+        fprintf(stderr,"Error: elf_begin: %s\n",elf_errmsg(-1));
+        exit(1);
+    }
+
+    if(elf_kind(e) != ELF_K_ELF)
+    {
+        fprintf(stderr,"Error: not an elf object? (kind=%d)\n",ek);
+        exit(1);
+    }
+
+    if(gelf_getehdr(e, &ehdr) == NULL)
+    {
+        fprintf(stderr,"Error: gelf_getehdr: %s\n",elf_errmsg(-1));
+        exit(1);
+    }
+
+    if(ehdr.e_machine != 40)
+    {
+        fprintf(stderr,"Error: ELF file is not for ARM\n");
+        exit(1);
+    }
+
+    elf_start_address = ehdr.e_entry;
+    printf("Setting start address to 0x%08X\n", elf_start_address);
+
+    scn = NULL;
+
+    while((scn=elf_nextscn(e,scn)) != NULL)
+    {
+        load_elf_section(e, scn);
+    }
+
+    elf_end(e);
+    close(fd);
+}
+//-------------------------------------------------------------------
 int main ( int argc, char *argv[] )
 {
     FILE *fp;
     unsigned int ra, i;
-
-    alloc_memory_regions(2);
-    set_memory_region(0, 0x00000000, 0x10000);
-    set_memory_region(1, 0x20000000, 0x10000);
-    reset_memory();
 
     if(argc<2)
     {
@@ -2072,26 +2186,45 @@ int main ( int argc, char *argv[] )
     for(ra=2;ra<argc;ra++)
     {
         if(strcmp(argv[ra],"--vcd")==0) output_vcd=1;
-    }
-    fp=fopen(argv[1],"rb");
-    if(fp==NULL)
-    {
-        fprintf(stderr,"Error opening file [%s]\n",argv[1]);
-        return(1);
-    }
-    // memset(rom,0xFF,sizeof(rom));
-    i = 0;
-    while(!feof(fp))
-    {
-        unsigned short s;
-
-        fread(&s, 1, 2, fp);
-        write_to_memory16(i, s);
-        i += 2;
+        if(strcmp(argv[ra],"--elf")==0) input_elf=1;
     }
 
-    // ra=fread(rom,1,sizeof(rom),fp);
-    fclose(fp);
+    if(input_elf == 1)
+    {
+        alloc_memory_regions(4);
+        set_memory_region(0, 0x08000000, 0x10000);
+        set_memory_region(1, 0x20000000, 0x10000);
+        set_memory_region(2, 0x40021000, 0x200);
+        set_memory_region(3, 0x48000800, 0x200);
+
+        reset_memory();
+        load_elf(argv[1]);
+    }
+    else
+    {
+        alloc_memory_regions(2);
+        set_memory_region(0, 0x00000000, 0x10000);
+        set_memory_region(1, 0x20000000, 0x10000);
+        reset_memory();
+
+        fp=fopen(argv[1],"rb");
+        if(fp==NULL)
+        {
+            fprintf(stderr,"Error opening file [%s]\n",argv[1]);
+            return(1);
+        }
+        i = 0;
+        while(!feof(fp))
+        {
+            unsigned short s;
+
+            fread(&s, 1, 2, fp);
+            write_to_memory16(i, s);
+            i += 2;
+        }
+
+        fclose(fp);
+    }
 
     if(output_vcd)
     {
