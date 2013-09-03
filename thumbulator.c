@@ -453,6 +453,11 @@ int execute ( void )
     write_register(15,pc);
 if(DISS) fprintf(stderr,"0x%08X: 0x%04X ",(pc-5),inst);
 
+    if(inst == 0xE7FE)
+    {
+        exit(0);
+    }
+
 if(output_vcd)
 {
     unsigned int vv;
