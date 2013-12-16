@@ -2187,6 +2187,12 @@ int main ( int argc, char *argv[] )
         return(1);
     }
 
+    if(strcmp(argv[1],"--version")==0)
+    {
+        printf("Version: 1.1.0\n");
+        return 0;
+    }
+
     output_vcd=0;
     for(ra=2;ra<argc;ra++)
     {
